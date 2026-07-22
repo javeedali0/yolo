@@ -1,6 +1,6 @@
 """
 100% Working Object Detection with Streamlit
-Uses YOLOv8 - Just upload image and get results
+Uses YOLOv8 - Production Ready
 """
 
 import streamlit as st
@@ -10,22 +10,25 @@ from ultralytics import YOLO
 from PIL import Image
 import time
 from collections import Counter
-import tempfile
+from io import BytesIO
+import requests
 import os
+import sys
 
 # Page configuration
 st.set_page_config(
     page_title="Object Detection App",
     page_icon="🔍",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
         text-align: center;
-        padding: 2rem 0;
+        padding: 1.5rem 0;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         border-radius: 10px;
         color: white;
@@ -37,6 +40,10 @@ st.markdown("""
         border-radius: 10px;
         text-align: center;
         margin: 0.5rem 0;
+        transition: transform 0.3s;
+    }
+    .stat-box:hover {
+        transform: scale(1.05);
     }
     .detection-tag {
         display: inline-block;
@@ -52,20 +59,39 @@ st.markdown("""
         padding: 1rem;
         color: #666;
         margin-top: 2rem;
+        border-top: 1px solid #eee;
+    }
+    .upload-area {
+        border: 2px dashed #667eea;
+        border-radius: 10px;
+        padding: 2rem;
+        text-align: center;
+        background: #f8f9ff;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Load model with caching
+# Initialize session state
+if 'detection_history' not in st.session_state:
+    st.session_state.detection_history = []
+
 @st.cache_resource
 def load_model():
-    """Load YOLOv8 model"""
-    with st.spinner("🔄 Loading YOLOv8 model... This may take a moment on first run."):
-        model = YOLO('yolov8n.pt')
+    """Load YOLOv8 model with caching"""
+    try:
+        # Check if model exists, if not download
+        model_path = 'yolov8n.pt'
+        if not os.path.exists(model_path):
+            st.info("📥 Downloading YOLOv8 model... This will happen only once.")
+        
+        model = YOLO(model_path)
         return model
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        st.stop()
 
 def draw_boxes(image, boxes, scores, class_names):
-    """Draw bounding boxes on image"""
+    """Draw bounding boxes on image with improved visualization"""
     img = image.copy()
     
     # Generate colors for each class
@@ -78,51 +104,82 @@ def draw_boxes(image, boxes, scores, class_names):
         x1, y1, x2, y2 = box
         color = colors[name]
         
-        # Draw rectangle
+        # Draw rectangle with rounded corners (approximated)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         
         # Draw label with background
         label = f"{name} {score:.2f}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(img, (x1, y1 - th - 10), (x1 + tw + 10, y1), color, -1)
+        
+        # Background for text
+        cv2.rectangle(img, (x1 - 2, y1 - th - 12), (x1 + tw + 10, y1 - 2), color, -1)
         cv2.putText(img, label, (x1 + 5, y1 - 5), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Add confidence bar
+        bar_width = int(score * 60)
+        cv2.rectangle(img, (x1 + 5, y2 + 5), (x1 + 5 + bar_width, y2 + 15), color, -1)
+        cv2.rectangle(img, (x1 + 5, y2 + 5), (x1 + 65, y2 + 15), (255, 255, 255), 1)
     
     return img
 
-def detect_objects(image):
+def detect_objects(image, confidence_threshold=0.25):
     """Perform object detection on image"""
-    # Convert PIL to numpy if needed
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-    
-    # Run detection
-    results = model(image)[0]
-    
-    boxes = []
-    scores = []
-    class_names = []
-    
-    # Extract detections
-    for box in results.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        confidence = box.conf[0].cpu().numpy()
-        class_id = int(box.cls[0].cpu().numpy())
-        class_name = results.names[class_id]
+    try:
+        # Convert PIL to numpy if needed
+        if isinstance(image, Image.Image):
+            image = np.array(image)
         
-        boxes.append([int(x1), int(y1), int(x2), int(y2)])
-        scores.append(float(confidence))
-        class_names.append(class_name)
-    
-    # Draw boxes on image
-    annotated_img = draw_boxes(image, boxes, scores, class_names)
-    
-    return annotated_img, boxes, scores, class_names
+        # Run detection
+        results = model(image, conf=confidence_threshold)[0]
+        
+        boxes = []
+        scores = []
+        class_names = []
+        
+        # Extract detections
+        for box in results.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            confidence = box.conf[0].cpu().numpy()
+            class_id = int(box.cls[0].cpu().numpy())
+            class_name = results.names[class_id]
+            
+            boxes.append([int(x1), int(y1), int(x2), int(y2)])
+            scores.append(float(confidence))
+            class_names.append(class_name)
+        
+        # Draw boxes on image
+        annotated_img = draw_boxes(image, boxes, scores, class_names)
+        
+        return annotated_img, boxes, scores, class_names
+    except Exception as e:
+        st.error(f"Error during detection: {str(e)}")
+        return None, [], [], []
+
+def load_example_image(url):
+    """Load example image from URL"""
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            img = Image.open(BytesIO(response.content))
+            return img
+        else:
+            st.error(f"Failed to load example image (Status: {response.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Error loading example image: {str(e)}")
+        return None
 
 # Load model
-model = load_model()
+try:
+    model = load_model()
+    model_loaded = True
+except Exception as e:
+    st.error(f"Failed to load model: {str(e)}")
+    model_loaded = False
+    st.stop()
 
-# Header
+# Main UI
 st.markdown("""
 <div class="main-header">
     <h1>🔍 Object Detection</h1>
@@ -130,207 +187,242 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Create columns for layout
+# Sidebar
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    confidence_threshold = st.slider(
+        "Confidence Threshold",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.25,
+        step=0.05,
+        help="Lower values detect more objects but may include false positives"
+    )
+    
+    st.markdown("---")
+    st.markdown("### ℹ️ About")
+    st.markdown("""
+    **Object Detection** using YOLOv8
+    
+    Detects 80+ common objects:
+    - 👤 People
+    - 🚗 Vehicles  
+    - 🐕 Animals
+    - 📱 Objects
+    - And more!
+    
+    ### 🎯 How to use:
+    1. Upload an image
+    2. Adjust confidence if needed
+    3. View results
+    4. Download annotated image
+    """)
+    
+    if st.button("🗑️ Clear History"):
+        st.session_state.detection_history = []
+        st.success("History cleared!")
+
+# Main content
 col1, col2 = st.columns([1, 1])
 
-# File uploader in first column
 with col1:
-    st.subheader("📤 Upload Image")
+    st.markdown("### 📤 Upload Image")
+    
+    # File uploader
     uploaded_file = st.file_uploader(
         "Choose an image...",
         type=['jpg', 'jpeg', 'png', 'webp', 'bmp'],
         help="Supported formats: JPG, PNG, WebP, BMP"
     )
     
-    # Example images section
     st.markdown("---")
-    st.subheader("🖼️ Try with Examples")
+    st.markdown("### 🖼️ Try Examples")
     
-    # Create sample images (dummy data for demonstration)
-    example_col1, example_col2, example_col3 = st.columns(3)
-    
-    # Sample image URLs (these are free test images)
+    # Example images
     examples = {
-        "🐕 Dog": "https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=200&h=200&fit=crop",
-        "🚗 Car": "https://images.unsplash.com/photo-1494976388531-d1058494cdd8?w=200&h=200&fit=crop",
-        "🌆 City": "https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?w=200&h=200&fit=crop"
+        "🐕 Dog & Cat": "https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=800&h=600&fit=crop",
+        "🚗 Street": "https://images.unsplash.com/photo-1494976388531-d1058494cdd8?w=800&h=600&fit=crop",
+        "🌆 City": "https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?w=800&h=600&fit=crop",
+        "👥 People": "https://images.unsplash.com/photo-1521737711867-e3b97375f902?w=800&h=600&fit=crop",
+        "🏠 House": "https://images.unsplash.com/photo-1568605114967-8130f3a36994?w=800&h=600&fit=crop",
+        "🌸 Nature": "https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=800&h=600&fit=crop"
     }
     
-    example_buttons = {}
-    with example_col1:
-        if st.button("🐕 Dog", use_container_width=True):
-            example_buttons['dog'] = True
-    with example_col2:
-        if st.button("🚗 Car", use_container_width=True):
-            example_buttons['car'] = True
-    with example_col3:
-        if st.button("🌆 City", use_container_width=True):
-            example_buttons['city'] = True
+    # Create example buttons in a grid
+    example_cols = st.columns(3)
+    for idx, (label, url) in enumerate(examples.items()):
+        with example_cols[idx % 3]:
+            if st.button(label, use_container_width=True, key=f"example_{idx}"):
+                with st.spinner(f"Loading {label}..."):
+                    img = load_example_image(url)
+                    if img:
+                        uploaded_file = img
+                        st.rerun()
 
-# Process image and show results in second column
 with col2:
-    st.subheader("📊 Results")
+    st.markdown("### 📊 Results")
     
-    # Check for example button clicks
-    if 'dog' in example_buttons:
-        # Load dog image from URL (using requests)
-        import requests
-        from io import BytesIO
-        try:
-            response = requests.get("https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=800&h=600&fit=crop")
-            if response.status_code == 200:
-                img = Image.open(BytesIO(response.content))
-                uploaded_file = img
-            else:
-                st.error("Could not load example image")
-        except:
-            st.error("Error loading example image")
-    
-    elif 'car' in example_buttons:
-        try:
-            response = requests.get("https://images.unsplash.com/photo-1494976388531-d1058494cdd8?w=800&h=600&fit=crop")
-            if response.status_code == 200:
-                img = Image.open(BytesIO(response.content))
-                uploaded_file = img
-            else:
-                st.error("Could not load example image")
-        except:
-            st.error("Error loading example image")
-    
-    elif 'city' in example_buttons:
-        try:
-            response = requests.get("https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?w=800&h=600&fit=crop")
-            if response.status_code == 200:
-                img = Image.open(BytesIO(response.content))
-                uploaded_file = img
-            else:
-                st.error("Could not load example image")
-        except:
-            st.error("Error loading example image")
-    
-    # Process uploaded file
+    # Process image
     if uploaded_file is not None:
-        # Display original image
+        # Load image
         if isinstance(uploaded_file, Image.Image):
             image = uploaded_file
         else:
-            image = Image.open(uploaded_file)
+            try:
+                image = Image.open(uploaded_file)
+            except Exception as e:
+                st.error(f"Error opening image: {str(e)}")
+                st.stop()
         
-        # Create placeholder for progress
-        progress_placeholder = st.empty()
-        progress_bar = progress_placeholder.progress(0, text="Starting detection...")
+        # Display original image
+        with st.expander("📸 Original Image", expanded=False):
+            st.image(image, use_column_width=True)
         
-        # Detect objects
-        progress_bar.progress(30, text="Processing image...")
-        start_time = time.time()
+        # Detection placeholder
+        detection_placeholder = st.empty()
         
-        annotated_img, boxes, scores, class_names = detect_objects(image)
+        # Progress
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
         
-        detection_time = round((time.time() - start_time) * 1000, 2)
-        progress_bar.progress(100, text="Done!")
-        
-        # Clear progress
-        progress_placeholder.empty()
-        
-        # Calculate statistics
-        total_objects = len(boxes)
-        counts = Counter(class_names)
-        unique_objects = len(counts)
-        
-        # Display stats
-        st.markdown("### 📈 Statistics")
-        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-        
-        with stats_col1:
-            st.markdown(f"""
-            <div class="stat-box">
-                <h2>{total_objects}</h2>
-                <p>Total Objects</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with stats_col2:
-            st.markdown(f"""
-            <div class="stat-box">
-                <h2>{unique_objects}</h2>
-                <p>Unique Types</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with stats_col3:
-            st.markdown(f"""
-            <div class="stat-box">
-                <h2>{detection_time}ms</h2>
-                <p>Detection Time</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with stats_col4:
-            st.markdown(f"""
-            <div class="stat-box">
-                <h2>{model.model.__class__.__name__}</h2>
-                <p>Model</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Display image
-        st.markdown("### 🖼️ Detection Results")
-        st.image(annotated_img, use_column_width=True, caption="Detected Objects")
-        
-        # Display detected objects
-        st.markdown("### 🏷️ Detected Objects")
-        
-        # Show objects as tags
-        objects_html = ""
-        for name, count in counts.most_common():
-            objects_html += f'<span class="detection-tag">{name} <span style="background:rgba(255,255,255,0.3);padding:0 8px;border-radius:10px;">{count}</span></span>'
-        
-        st.markdown(objects_html, unsafe_allow_html=True)
-        
-        # Show detailed detections
-        with st.expander("📋 Detailed Detections"):
-            detections_data = []
-            for i, (box, score, name) in enumerate(zip(boxes, scores, class_names), 1):
-                detections_data.append({
-                    "#": i,
-                    "Object": name,
-                    "Confidence": f"{score:.3f}",
-                    "Bounding Box": f"[{box[0]}, {box[1]}, {box[2]}, {box[3]}]"
-                })
-            st.table(detections_data)
-        
-        # Download button
-        st.markdown("### 💾 Download Results")
-        
-        # Convert annotated image to bytes
-        annotated_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
-        annotated_pil = Image.fromarray(annotated_rgb)
-        
-        # Save to bytes
-        buf = BytesIO()
-        annotated_pil.save(buf, format="JPEG", quality=90)
-        byte_im = buf.getvalue()
-        
-        st.download_button(
-            label="📥 Download Annotated Image",
-            data=byte_im,
-            file_name="detected_objects.jpg",
-            mime="image/jpeg",
-            use_container_width=True
-        )
-        
+        try:
+            # Detect objects
+            progress_text.text("🔄 Processing image...")
+            progress_bar.progress(30)
+            
+            start_time = time.time()
+            annotated_img, boxes, scores, class_names = detect_objects(
+                image, 
+                confidence_threshold
+            )
+            detection_time = round((time.time() - start_time) * 1000, 2)
+            
+            progress_bar.progress(100)
+            progress_text.text("✅ Detection complete!")
+            
+            # Clear progress
+            time.sleep(0.5)
+            progress_text.empty()
+            progress_bar.empty()
+            
+            if annotated_img is not None:
+                # Calculate statistics
+                total_objects = len(boxes)
+                counts = Counter(class_names)
+                unique_objects = len(counts)
+                
+                # Display stats
+                st.markdown("### 📈 Statistics")
+                stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+                
+                with stats_col1:
+                    st.metric("Total Objects", total_objects)
+                with stats_col2:
+                    st.metric("Unique Types", unique_objects)
+                with stats_col3:
+                    st.metric("Detection Time", f"{detection_time}ms")
+                with stats_col4:
+                    st.metric("Confidence", f"{confidence_threshold:.2f}")
+                
+                # Display annotated image
+                st.markdown("### 🖼️ Detection Results")
+                st.image(annotated_img, use_column_width=True)
+                
+                # Display detected objects as tags
+                st.markdown("### 🏷️ Detected Objects")
+                objects_html = ""
+                for name, count in counts.most_common():
+                    objects_html += f'<span class="detection-tag">{name} <span style="background:rgba(255,255,255,0.3);padding:0 8px;border-radius:10px;">{count}</span></span>'
+                
+                if objects_html:
+                    st.markdown(objects_html, unsafe_allow_html=True)
+                else:
+                    st.info("No objects detected with current confidence threshold. Try lowering the threshold.")
+                
+                # Save to history
+                detection_data = {
+                    'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'total_objects': total_objects,
+                    'unique_objects': unique_objects,
+                    'detection_time': detection_time,
+                    'objects': dict(counts)
+                }
+                st.session_state.detection_history.append(detection_data)
+                
+                # Download button
+                st.markdown("### 💾 Download Results")
+                
+                # Convert annotated image to bytes
+                annotated_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+                annotated_pil = Image.fromarray(annotated_rgb)
+                
+                # Save to bytes
+                buf = BytesIO()
+                annotated_pil.save(buf, format="JPEG", quality=90)
+                byte_im = buf.getvalue()
+                
+                download_col1, download_col2 = st.columns(2)
+                with download_col1:
+                    st.download_button(
+                        label="📥 Download Image",
+                        data=byte_im,
+                        file_name=f"detected_{int(time.time())}.jpg",
+                        mime="image/jpeg",
+                        use_container_width=True
+                    )
+                
+                # Export results as CSV
+                if st.button("📊 Export Results as CSV", use_container_width=True):
+                    import pandas as pd
+                    df = pd.DataFrame([
+                        {"Object": name, "Count": count, "Confidence": confidence_threshold}
+                        for name, count in counts.most_common()
+                    ])
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=csv,
+                        file_name=f"detection_results_{int(time.time())}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            else:
+                st.error("Detection failed. Please try again with a different image.")
+                
+        except Exception as e:
+            st.error(f"Error during detection: {str(e)}")
     else:
-        # Show placeholder when no image is uploaded
+        # Show placeholder
         st.info("👆 Upload an image or try an example to start detection")
         
-        # Show sample detection visualization
         st.markdown("""
         <div style="text-align: center; padding: 2rem; background: #f8f9ff; border-radius: 10px;">
             <p style="font-size: 4rem;">🔍</p>
             <p style="color: #666;">Your image will appear here with detections</p>
             <p style="color: #999; font-size: 0.9rem;">YOLOv8 detects 80 different object classes</p>
+            <p style="color: #999; font-size: 0.9rem;">Try adjusting the confidence threshold in sidebar</p>
         </div>
         """, unsafe_allow_html=True)
+
+# Detection History
+if st.session_state.detection_history:
+    st.markdown("---")
+    st.markdown("### 📜 Detection History")
+    
+    # Show last 5 detections
+    history_df = []
+    for i, record in enumerate(st.session_state.detection_history[-5:][::-1]):
+        history_df.append({
+            "Time": record['timestamp'],
+            "Objects": record['total_objects'],
+            "Unique": record['unique_objects'],
+            "Time (ms)": record['detection_time'],
+            "Detected": ", ".join([f"{k}({v})" for k, v in record['objects'].items()][:3])
+        })
+    
+    if history_df:
+        import pandas as pd
+        st.dataframe(pd.DataFrame(history_df), use_container_width=True)
 
 # Footer
 st.markdown("---")
@@ -340,39 +432,3 @@ st.markdown("""
     <p style="font-size: 0.8rem;">Objects: person, bicycle, car, motorcycle, bus, truck, cat, dog, and many more...</p>
 </div>
 """, unsafe_allow_html=True)
-
-# Add a sidebar with information
-with st.sidebar:
-    st.markdown("### ℹ️ About")
-    st.markdown("""
-    **Object Detection** using YOLOv8
-    
-    This app can detect:
-    - 👤 People
-    - 🚗 Vehicles
-    - 🐕 Animals
-    - 📱 Objects
-    - And 80+ classes!
-    
-    ### 🎯 How to use:
-    1. Upload an image
-    2. Wait for detection
-    3. See results with boxes
-    4. Download annotated image
-    
-    ### 📊 Classes:
-    The model detects 80 common objects including:
-    - Person, bicycle, car, motorcycle
-    - Airplane, bus, train, truck
-    - Boat, traffic light, fire hydrant
-    - Cat, dog, horse, sheep, cow
-    - And many more...
-    
-    ### 🔧 Performance:
-    - Fast detection (50-100ms)
-    - High accuracy
-    - Works with various image sizes
-    """)
-    
-    st.markdown("---")
-    st.markdown("Made with ❤️ using Streamlit")
